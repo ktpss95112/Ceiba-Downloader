@@ -2,6 +2,7 @@ from datetime import datetime
 import json
 import logging
 import uuid
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
@@ -15,8 +16,7 @@ from .crawler import Crawler
 from .exceptions import (CheckForUpdatesError, InvalidCredentials,
                          InvalidFilePath, InvalidLoginParameters,
                          NullTicketContent, SendTicketError)
-from .strings import strings
-
+from .const import strings, Role
 
 class Ceiba():
     def __init__(self):
@@ -54,28 +54,32 @@ class Ceiba():
         if '登出' not in resp.content.decode('utf-8'):
             raise InvalidCredentials
         
-    def login(self, alternative=True,
+    def login(self, role: Role = Role.NTUer,
               cookie_PHPSESSID: Optional[str] = None, 
               username: Optional[str] = None,
               password: Optional[str] = None,
               progress = None):
+        '''
+        :param role: Integer. 0: NTUer, 1: TA, 2: Professor, 3: Outside NTU
+        '''
+        self.role = role
         
         if cookie_PHPSESSID:
             self.sess.cookies.set("PHPSESSID", cookie_PHPSESSID)
         elif username and password:
-            if not alternative:
+            if self.role == Role.NTUer:
                 self.login_user(username, password)
-            else:
+            elif self.role == Role.TA or \
+                 self.role == Role.Outside_Teacher or \
+                 self.role == Role.Outside_Student:
                 self.login_alternative_user(username, password)
             if progress:
                 progress.emit(1)
         else:
             raise InvalidLoginParameters
         # check if user credential is correct
-        self.is_alternative = alternative
-        info_url = util.info_url
-        if alternative:
-            info_url = util.alternative_info_url
+        
+        info_url = util.info_url(self.role)
 
         soup = BeautifulSoup(util.get(self.sess, info_url).content, 'html.parser')
         if progress:
@@ -84,7 +88,7 @@ class Ceiba():
             trs = soup.find_all("tr")
             self.student_name = trs[0].find('td').text
             self.email = trs[5].find('td').text
-            if alternative:
+            if self.role == Role.TA:  # ta
                 self.email = trs[4].find('td').text
             self.id: str = self.email.split('@')[0]
             self.is_login = True
@@ -109,9 +113,7 @@ class Ceiba():
     def get_courses_list(self):
 
         logging.info(strings.try_to_get_courses)
-        courses_url = util.courses_url
-        if self.is_alternative:
-            courses_url = util.alternative_courses_url
+        courses_url = util.courses_url(self.role)
         
         soup = BeautifulSoup(
             util.get(self.sess, courses_url).content, 'html.parser')
@@ -119,13 +121,25 @@ class Ceiba():
         rows = self.__get_courses_rows_from_homepage_table(soup)
         
         count: int = 0
-        
+        row: Tag
         for row in rows:
             count += 1
             try:
                 cols = row.find_all('td')
                 href = cols[4].find('a').get('href')
                 name = cols[4].get_text(strip=True, separator='\n').splitlines()
+                
+                admin_url = None
+                if util.is_admin(self.role):
+                    onclick_val = cols[len(cols)-1].find('input').get('onclick')
+                    m = re.search(r"\'([0-9a-f]*)\'", onclick_val)
+                    if m:
+                        course_sn = m.group(1)
+                    if self.role == Role.TA:
+                        admin_url = util.ta_admin_url + course_sn
+                    else:
+                        admin_url = util.admin_url + course_sn
+
                 cols = [ele.text.strip() for ele in cols]
                 cname = name[0]
                 if cname in util.skip_courses_list:
@@ -133,12 +147,14 @@ class Ceiba():
                 ename = name[1] if len(name) > 1 else cname
                 if ename.startswith('http'):  # some courses have no ename but show their url (in ta's page)
                     ename = cname  # use cname instead
+
                 course = Course(semester=cols[0],
                                 course_num=cols[2],
                                 cname=cname,
                                 ename=ename,
                                 teacher=cols[5],
-                                href=href)
+                                href=href,
+                                admin_url=admin_url)
                 self.courses.append(course)
                 self.course_dir_map[course.id] = course.folder_name
             except (IndexError, AttributeError) as e:
@@ -172,7 +188,12 @@ class Ceiba():
                 logging.info(strings.course_download_info.format(course_name))
                 self.courses_dir.joinpath(course.folder_name).mkdir(exist_ok=True)
                 try:
-                    course.download(self.courses_dir, self.sess, modules_filter, progress)
+                    if self.role == Role.Professor or \
+                        self.role == Role.Outside_Teacher or \
+                        self.role == Role.TA:
+                        course.download_admin(self.courses_dir, self.sess, progress)
+                    else:
+                        course.download(self.courses_dir, self.sess, modules_filter, progress)
                 except Exception as e:
                     logging.error(e, exc_info=True)
                     logging.warning(strings.error_skip_and_continue_download_courses.format(course_name))
@@ -195,9 +216,7 @@ class Ceiba():
         
         logging.info(strings.start_downloading_homepage)
         
-        courses_url = util.courses_url
-        if self.is_alternative:
-            courses_url = util.alternative_courses_url
+        courses_url = util.courses_url(self.role)
 
         resp = util.get(self.sess, courses_url)
         soup = BeautifulSoup(resp.content, 'html.parser')
@@ -207,6 +226,7 @@ class Ceiba():
         rows = self.__get_courses_rows_from_homepage_table(soup)
         
         valid_a_tag = set()
+        row: Tag
         for row in rows:
             try:
                 cols = row.find_all('td')
@@ -220,6 +240,14 @@ class Ceiba():
                     row['style'] = 'background: silver;'
                     continue
                 course['href'] = "courses/" + self.course_dir_map[course_id] + '/index.html'
+                if util.is_admin(self.role):
+                    op = row.find('input', {'value': '管理'})
+                    op.name = 'a'
+                    op.string = '管理'
+                    op['href'] = "courses/" + self.course_dir_map[course_id] + "/admin/index.html"
+                    for attr in ['class', 'name', 'onclick', 'type', 'value']:
+                        del op[attr]
+                    valid_a_tag.add(op)
                 valid_a_tag.add(course)
             except (IndexError, AttributeError) as e:
                 logging.error(e, exc_info=True)

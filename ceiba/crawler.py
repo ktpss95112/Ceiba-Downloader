@@ -10,7 +10,7 @@ from bs4.element import ResultSet, Tag
 
 from . import util
 from .exceptions import NotFound
-from .strings import strings
+from .const import strings
 
 
 class Crawler():
@@ -52,10 +52,10 @@ class Crawler():
             logging.info(strings.crawler_download_info.format(self.text))
 
         if 'text/html' not in response.headers['content-type']:  # files (e.g. pdf, docs)
-            return self.__save_files(response.content)
+            return self._save_files(response.content)
 
         self.filename += ".html"
-        filepath = self.__get_uniq_filepath(self.path.joinpath(self.filename))
+        filepath = self._get_uniq_filepath(self.path.joinpath(self.filename))
         Crawler.crawled_files_path.add(filepath)
         Crawler.crawled_urls[self.url] = filepath
 
@@ -111,7 +111,10 @@ class Crawler():
                 a.replaceWithChildren()
                 continue
             url = urljoin(resp_url, a.get('href'))
-            if not url.startswith('http') or urlparse(url).netloc != 'ceiba.ntu.edu.tw' or len(a.text) == 0:
+            if not url.startswith('http') or \
+               urlparse(url).netloc != 'ceiba.ntu.edu.tw' or \
+               urlparse(url).path == '' or \
+               len(a.text) == 0:
                 continue
             filename = a.text
             text = a.text
@@ -193,16 +196,16 @@ class Crawler():
             Crawler(self.session, url, static_dir, self.module, filename,
                     css['href']).crawl_css_and_resources()
 
-    def __save_files(self, content: bytes) -> Path:
+    def _save_files(self, content: bytes) -> Path:
         files_dir = self.path / "files"
         files_dir.mkdir(exist_ok=True)
-        filepath = self.__get_uniq_filepath(files_dir.joinpath(self.filename))
+        filepath = self._get_uniq_filepath(files_dir.joinpath(self.filename))
         filepath.write_bytes(content)
-        Crawler.crawled_files_path.add(filepath)
-        Crawler.crawled_urls[self.url] = filepath
+        self.__class__.crawled_files_path.add(filepath)
+        self.__class__.crawled_urls[self.url] = filepath
         return filepath
         
-    def __get_uniq_filepath(self, path: Path):
+    def _get_uniq_filepath(self, path: Path):
         if path not in Crawler.crawled_files_path:
             return path
 
